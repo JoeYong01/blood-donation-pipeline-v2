@@ -6,8 +6,11 @@ import os
 
 from src.dataframe_cleaner import DataFrameCleaner
 from src.dataframe_manager import DataFrameManager
+import src.gbq_queries as gbqq
 
 import duckdb
+import pandas as pd
+import pandas_gbq as pdbq
 
 ##### LOGGING #####
 DATE_NOW = datetime.now().strftime("%Y/%m/%d")
@@ -43,6 +46,9 @@ if not os.path.exists(DUCKDB_FOLDER):
 
 DUCKDB_CONN = duckdb.connect(database="duckdb/blood_donation_pipeline_v2.duckdb")
 
+GCP_PROJECT_ID = "itsmejoeyong-portfolio"
+BQ_SCHEMA = "blood_donation_pipeline_v2"
+
 
 def main() -> None:
     logger.info("beginning of log: running pipeline.py")
@@ -51,13 +57,39 @@ def main() -> None:
         df_manager = DataFrameManager(url)
         df_name = df_manager.name
         df = df_manager.df
+        bq_destination = f"{BQ_SCHEMA}.{df_name}"
 
         # duckdb will select from this variable
         cleaned_df = df_cleaner.clean_dataframe(df, DATES)
+        logger.info("writing raw tables to bigquery")
+        pdbq.to_gbq(
+            dataframe=cleaned_df,
+            project_id=GCP_PROJECT_ID,
+            destination_table=bq_destination,
+            if_exists="replace",
+        )
 
-        query = f"CREATE OR REPLACE TABLE {df_name} AS SELECT * FROM cleaned_df;"
-        DUCKDB_CONN.execute(query)
-    logger.info("end of log: pipeline.py completed successfully")
+    # query = f"CREATE OR REPLACE TABLE {df_name} AS SELECT * FROM cleaned_df;"
+    # DUCKDB_CONN.execute(query)
+    logger.info("processing raw tables in bigquery")
+
+    datamarts = {
+        "granular_average_donations_by_age_group_query": gbqq.granular_average_donations_by_age_group_query,
+        "granular_cohorts_query": gbqq.granular_cohorts_query,
+        "granular_average_months_before_churn_query_v2": gbqq.granular_average_months_before_churn_query_v2,
+        "granular_average_months_between_donations_query": gbqq.granular_average_months_between_donations_query,
+    }
+
+    for key, value in datamarts.items():
+        result = pdbq.read_gbq(
+            query_or_table=value,
+            project_id=GCP_PROJECT_ID,
+        )
+        logger.info(f"creating datamarts: {key} in DuckDB")
+        DUCKDB_CONN.execute(f"CREATE OR REPLACE TABLE {key} AS SELECT * FROM result")
+
+        # print(DUCKDB_CONN.execute(f"SELECT * FROM {key} LIMIT 10").df())
+    logger.info("successfully wrote datamarts to DuckDB")
 
 
 if __name__ == "__main__":
